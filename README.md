@@ -12,3 +12,6 @@ You can run this code from terminal:
 ### Steps to Run
 The code is ready for use, you can run it, and you will be prompted to ask questions about the dummy data.
 The dummy data is a PDF about cloud computing located in the `.\Team10\data\cc.pdf`.
+
+> [!WARNING]
+> Please use your own OpenAI API Key, since the one in the code does not work due to security policies. 
