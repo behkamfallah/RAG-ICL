@@ -14,4 +14,4 @@ The code is ready for use, you can run it, and you will be prompted to ask quest
 The dummy data is a PDF about cloud computing located in the `.\Team10\data\cc.pdf`.
 
 > [!WARNING]
-> Please use your own OpenAI API Key, since the one in the code does not work due to security policies. 
+> Please use your own OpenAI API Key in Line 32 of the code, since the one in the code does not work due to security policies. 
