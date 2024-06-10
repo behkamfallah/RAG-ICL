@@ -7,3 +7,4 @@ python-dotenv
 tiktoken
 pypdf
 langchain-pinecone
+pinecone
