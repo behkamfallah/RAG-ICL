@@ -9,6 +9,8 @@ You can run this code from terminal:
 ```py
 !pip install -r requirements.txt
 ```
+
+Ensure that you put OpenAI and Pinecone API key into .env file.
 ### Steps to Run
 The code is ready for use, you can run it, and you will be prompted to ask questions about the dummy data.
 The dummy data is a PDF about cloud computing located in the `.\Team10\data\cc.pdf`.
