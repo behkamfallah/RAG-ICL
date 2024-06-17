@@ -1,74 +1,84 @@
 import os
+import time
 from dotenv import load_dotenv, find_dotenv
-load_dotenv('.env')
-os.environ.get('PINECONE_API_KEY')
-os.environ.get('OPENAI_API_KEY')
-# Load the PDF in this section.
+from pinecone import Pinecone, ServerlessSpec
+from langchain_pinecone import PineconeVectorStore
+from langchain_openai import OpenAIEmbeddings
 
+# Load .env file and API Keys
+load_dotenv(find_dotenv(), override=True)
+openai_api_key = os.environ.get("OPENAI_API_KEY")
+pinecone_api_key = os.environ.get("PINECONE_API_KEY")
+
+
+# Load the PDF in this section.
 def load_document(file):
-    from langchain.document_loaders import PyPDFLoader
+    from langchain_community.document_loaders import PyPDFLoader
     print(f"Loading {file}")
-    data = PyPDFLoader(file).load()
-    return data
+    data_from_pdf = PyPDFLoader(file).load()
+    return data_from_pdf
+
+
+# data is a list.  Each element is a LangChain Document
+# for each page of the PDF with the
+# page's content and some metadata
+# about where in the document the text came from.
 data = load_document("../data/cc.pdf")
 
 # To show how many pages the PDF has.
 print(f"Pdf has {len(data)} pages.")
 
+
 # Split data into chunks.
-# Chunksize is by default 256 and Chunkoverlap is 64.
-def chunk_data(data, chunk_size=256):
-  from langchain.text_splitter import RecursiveCharacterTextSplitter
-  text_splitter = RecursiveCharacterTextSplitter(chunk_size = chunk_size, chunk_overlap = 64)
-  chunks = text_splitter.split_documents(data)
-  return(chunks)
+# Chunk size is by default 256 and Chunk overlap is 64.
+def chunk_data(text, chunk_size=256, chunk_overlap=64):
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                                                   add_start_index=True)
+    all_splits = text_splitter.split_documents(text)
+    return all_splits
+
+
 chunks = chunk_data(data)
 
+
 def insert_or_fetch_embeddings(index_name, chunks):
-    import pinecone
-    from pinecone import Pinecone, ServerlessSpec
-    from langchain_openai import OpenAIEmbeddings
-    from langchain_pinecone import PineconeVectorStore
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key='sk-proj-JnjTpBTJJ1aTBQfMRtJjT3BlbkFJ2N4I9vSeTD6WN6niNlRF') # Best performance according to cost
-    # pinecone.init(api_key=os.environ.get('PINECONE_API_KEY'), environment=os.environ.get('PINECONE_ENV'))
-    pc = Pinecone(
-        api_key='656f5292-ed1e-40ff-a6ad-0b53adb69e51'
-    )
-    from pinecone import Pinecone
-    index_name = "chatdoc" # or your index name
+    # Create embeddings
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=openai_api_key)
+
+    # Create an instance of Vector Store
+    pc = Pinecone(api_key=pinecone_api_key)
+
     if index_name in pc.list_indexes().names():
-        pc.delete_index("chatdoc")
+        print('Deleting existing index...')
+        pc.delete_index(index_name)
 
-    # You should use the same similarity metric used to train the model that created the embeddings.
-    # For example, if you're using OpenAI (any of their GPT models so far) you should use cosine similarity.
-    # https://www.pinecone.io/learn/vector-similarity/
+    print('Creating Index...This may take a while...')
+    pc.create_index(
+        name=index_name,
+        dimension=1536,
+        metric='cosine',
+        spec=ServerlessSpec(cloud='aws', region='us-east-1')
+    )
 
-    if 'my_index' not in pc.list_indexes().names():
-        pc.create_index(
-            name=index_name,
-            dimension=1536,
-            metric='cosine',
-            spec=ServerlessSpec(
-                cloud='aws',
-                region='us-east-1'
-            )
-        )
-        vector_store = PineconeVectorStore.from_documents(chunks, embeddings, index_name=index_name)
-    return vector_store
+    print('Inserting embeddings into Pinecone Vector Database...')
+    new_vector_store = PineconeVectorStore.from_documents(chunks, embeddings, index_name=index_name)
+
+    return new_vector_store
+
 
 # This will put the vectorized data in the Vector DB
 # This step will take some time according to the data size...
-index_name = 'chatdoc'
+index_name = 'chduck'
 vector_store = insert_or_fetch_embeddings(index_name, chunks)
 
-def ask_and_get_answer(vector_store, q):
-    from langchain.chains import RetrievalQA
-    from langchain.chains import LLMChain
-    from langchain.chat_models import ChatOpenAI
-    from langchain import PromptTemplate
-    llm = ChatOpenAI(model='gpt-3.5-turbo', temperature=1)
 
-    retriever = vector_store.as_retriever(search_type='similarity', search_kwargs={'k': 5})
+def ask_and_get_answer(vector_db, question):
+    from langchain_openai import ChatOpenAI
+    from langchain_core.prompts import PromptTemplate
+
+    llm = ChatOpenAI(model='gpt-3.5-turbo', temperature=1)
+    retriever = vector_db.as_retriever(search_type='similarity', search_kwargs={'k': 5})
 
     # Define in-context examples
     examples = [
@@ -80,39 +90,49 @@ def ask_and_get_answer(vector_store, q):
     ]
 
     # Retrieve relevant documents
-    retrieved_docs = retriever.get_relevant_documents(q)
+    retrieved_docs = retriever.invoke(question)
     retrieved_texts = [doc.page_content for doc in retrieved_docs]
 
     template = """
-    The following are some examples of question and answer pairs about cloud computing:
+    The following are some examples of question and answer pairs about the pdf file:
 
     {examples_prompt}
 
-    Context:
+    This context is retrieved from related source:
+    
     {context}
 
-    Now, answer the following question:
+    If and only if the question clearly states a need to a code in C programming language, 
+    then make sure you give the code snippet too. Otherwise chat or give answer as you normally do.
     Question: {q}
+    
     Answer:
     """
-    prompt = PromptTemplate(
-        input_variables = ['examples_prompt', 'context', 'q'],
-        template = template
-    )
-    chain = LLMChain(llm=llm, prompt=prompt)
-    answer = chain.run({'examples_prompt':"\n\n".join([f"Question: {ex['question']}\nAnswer: {ex['answer']}" for ex in examples]), 'context':"\n\n".join(retrieved_texts), 'q':q})
-    return answer
 
-import time
+    prompt = PromptTemplate(
+        input_variables=['examples_prompt', 'context', 'q'],
+        template=template
+    )
+
+    chain = prompt | llm
+
+    answer = chain.invoke({'examples_prompt': "\n\n".join([f"Question: {ex['question']}\nAnswer: {ex['answer']}" for ex
+                                                            in examples]), 'context': "\n\n".join(retrieved_texts),
+                                                            'q': question})
+    print(answer.page)
+    return answer.content
+
+
 i = 1
-print('Write Quit or Exit to quit.')
 while True:
+    print('Write Quit or Exit to stop.')
     q = input(f'Question #{i}: ')
     i = i + 1
     if q.lower() in ['quit', 'exit']:
-        print('Quitting...')
-        time.sleep(2)
+        print('Exiting...')
+        time.sleep(4)
         break
-    answer = ask_and_get_answer(vector_store, q)
-    print(f'\nAnswer: {answer}')
+
+    ai_answer = ask_and_get_answer(vector_store, q)
+    print(f'\nAnswer: {ai_answer}')
     print(f'\n {"-" * 50} \n')
