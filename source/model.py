@@ -1,6 +1,13 @@
 import os
 import time
 from dotenv import load_dotenv, find_dotenv
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.history_aware_retriever import create_history_aware_retriever
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
 from pinecone import Pinecone, ServerlessSpec
 from langchain_pinecone import PineconeVectorStore
 from langchain_openai import OpenAIEmbeddings
@@ -73,66 +80,95 @@ index_name = 'chduck'
 vector_store = insert_or_fetch_embeddings(index_name, chunks)
 
 
-def ask_and_get_answer(vector_db, question):
+def ask_and_get_answer(vector_db):
     from langchain_openai import ChatOpenAI
-    from langchain_core.prompts import PromptTemplate
 
     llm = ChatOpenAI(model='gpt-3.5-turbo', temperature=1)
     retriever = vector_db.as_retriever(search_type='similarity', search_kwargs={'k': 5})
 
-    # Define in-context examples
-    examples = [
-        {"question": "What is cloud computing?", "answer": "Cloud computing is the delivery of computing services—including servers, storage, databases, networking, software, and analytics—over the internet ('the cloud') to offer faster innovation, flexible resources, and economies of scale."},
-        {"question": "What are the three main types of cloud computing?", "answer": "The three main types of cloud computing are Infrastructure as a Service (IaaS), Platform as a Service (PaaS), and Software as a Service (SaaS)."},
-        {"question": "What are some benefits of using cloud computing?", "answer": "Some benefits of using cloud computing include cost savings, scalability, performance, speed, and reliability."},
-        {"question": "How does cloud storage work?", "answer": "Cloud storage works by allowing data to be stored on remote servers accessed from the internet. It is maintained, operated, and managed by a cloud storage service provider on storage servers that are built on virtualization techniques."},
-        {"question": "What is a hybrid cloud?", "answer": "A hybrid cloud is a computing environment that combines a public cloud and a private cloud by allowing data and applications to be shared between them. By using hybrid cloud, businesses can achieve greater flexibility and more deployment options."},
-    ]
+    # Contextualize question
+    contextualize_q_system_prompt = (
+        "Given a chat history and the latest user question "
+        "which might reference context in the chat history, "
+        "formulate a standalone question which can be understood "
+        "without the chat history. Do NOT answer the question, "
+        "just reformulate it if needed and otherwise return it as is."
+    )
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
 
-    # Retrieve relevant documents
-    retrieved_docs = retriever.invoke(question)
-    retrieved_texts = [doc.page_content for doc in retrieved_docs]
+    history_aware_retriever = create_history_aware_retriever(
+        llm, retriever, contextualize_q_prompt
+    )
 
-    template = """
+    # Answer question
+    system_prompt = ("""
     The following are some examples of question and answer pairs about the pdf file:
 
-    {examples_prompt}
+    Q1: What is cloud computing?, Answer: Cloud computing is the delivery of computing services—including servers, storage, databases, networking, software, and analytics—over the internet ('the cloud') to offer faster innovation, flexible resources, and economies of scale.
+    Q2: What are the three main types of cloud computing? Answer: The three main types of cloud computing are Infrastructure as a Service (IaaS), Platform as a Service (PaaS), and Software as a Service (SaaS).
+    Q3: What are some benefits of using cloud computing? Answer: Some benefits of using cloud computing include cost savings, scalability, performance, speed, and reliability.
+    Q4: How does cloud storage work? Answer: Cloud storage works by allowing data to be stored on remote servers accessed from the internet. It is maintained, operated, and managed by a cloud storage service provider on storage servers that are built on virtualization techniques.
+    Q5: What is a hybrid cloud? Answer: A hybrid cloud is a computing environment that combines a public cloud and a private cloud by allowing data and applications to be shared between them. By using hybrid cloud, businesses can achieve greater flexibility and more deployment options.
 
     This context is retrieved from related source:
-    
+
     {context}
 
     If and only if the question clearly states a need to a code in C programming language, 
     then make sure you give the code snippet too. Otherwise chat or give answer as you normally do.
-    Question: {q}
-    
-    Answer:
-    """
+    """)
 
-    prompt = PromptTemplate(
-        input_variables=['examples_prompt', 'context', 'q'],
-        template=template
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+    # Statefully manage chat history
+    store = {}
+
+    def get_session_history(session_id: str) -> BaseChatMessageHistory:
+        if session_id not in store:
+            store[session_id] = ChatMessageHistory()
+        return store[session_id]
+
+    conversational_rag_chain = RunnableWithMessageHistory(
+        rag_chain,
+        get_session_history,
+        input_messages_key="input",
+        history_messages_key="chat_history",
+        output_messages_key="answer",
     )
 
-    chain = prompt | llm
+    i = 1
+    while True:
+        print('Write Quit or Exit to stop.')
+        q = input(f'Question #{i}: ')
+        i = i + 1
+        if q.lower() in ['quit', 'exit']:
+            print('Exiting...')
+            time.sleep(4)
+            break
 
-    answer = chain.invoke({'examples_prompt': "\n\n".join([f"Question: {ex['question']}\nAnswer: {ex['answer']}" for ex
-                                                            in examples]), 'context': "\n\n".join(retrieved_texts),
-                                                            'q': question})
-    print(answer.page)
-    return answer.content
+        print(f'\nAnswer:')
+        print(conversational_rag_chain.invoke(
+            {"input": q},
+            config={
+                "configurable": {"session_id": "abc123"}
+            },  # constructs a key "abc123" in `store`.
+        )["answer"])
+        print(f'\n {"-" * 50} \n')
 
 
-i = 1
-while True:
-    print('Write Quit or Exit to stop.')
-    q = input(f'Question #{i}: ')
-    i = i + 1
-    if q.lower() in ['quit', 'exit']:
-        print('Exiting...')
-        time.sleep(4)
-        break
-
-    ai_answer = ask_and_get_answer(vector_store, q)
-    print(f'\nAnswer: {ai_answer}')
-    print(f'\n {"-" * 50} \n')
+ask_and_get_answer(vector_store)
