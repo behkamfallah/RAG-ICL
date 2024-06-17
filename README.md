@@ -15,5 +15,3 @@ Ensure that you put OpenAI and Pinecone API key into .env file.
 The code is ready for use, you can run it, and you will be prompted to ask questions about the dummy data.
 The dummy data is a PDF about cloud computing located in the `.\Team10\data\cc.pdf`.
 
-> [!WARNING]
-> Please use your own OpenAI API Key in Line 32 of the code, since the one in the code does not work due to security policies. 
